@@ -1,5 +1,5 @@
 [build]
-builder = "nixpacks"
+builder = "dockerfile"
 
 [deploy]
 healthcheckPath = "/health"
@@ -9,3 +9,4 @@ restartPolicyType = "always"
 [env]
 PYTHONUNBUFFERED = "1"
 FLASK_ENV = "production"
+DISPLAY = ":99"
