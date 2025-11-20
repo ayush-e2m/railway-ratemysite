@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-RateMySite scraping logic with debugging
+RateMySite scraping logic with debugging - Railway/Docker compatible
 """
 
 import json
 import re
 import time
 import traceback
+import os
+import subprocess
+import shutil
 from typing import Dict, List, Optional, Generator
 
 from selenium import webdriver
@@ -18,13 +21,115 @@ from selenium.common.exceptions import (
     NoSuchElementException,
     ElementClickInterceptedException,
     StaleElementReferenceException,
+    WebDriverException,
 )
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
 
 RATEMYSITE_URL = "https://www.ratemysite.xyz/"
 DEFAULT_TIMEOUT = 45
+
+def _find_chrome_executable():
+    """Find Chrome executable in different environments"""
+    possible_names = [
+        'google-chrome',
+        'google-chrome-stable', 
+        'chromium',
+        'chromium-browser',
+        '/usr/bin/google-chrome',
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/chromium',
+        '/usr/bin/chromium-browser'
+    ]
+    
+    for name in possible_names:
+        path = shutil.which(name)
+        if path:
+            return path
+            
+    # Check common paths manually
+    common_paths = [
+        '/usr/bin/google-chrome',
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/chromium',
+        '/usr/bin/chromium-browser',
+        '/opt/google/chrome/google-chrome'
+    ]
+    
+    for path in common_paths:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    
+    return None
+
+def _find_chromedriver():
+    """Find ChromeDriver executable"""
+    # Try to find chromedriver
+    driver_path = shutil.which('chromedriver')
+    if driver_path:
+        return driver_path
+        
+    # Common paths for chromedriver
+    common_paths = [
+        '/usr/bin/chromedriver',
+        '/usr/local/bin/chromedriver'
+    ]
+    
+    for path in common_paths:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    
+    return None
+
+def _make_driver(headless: bool = True) -> Optional[webdriver.Chrome]:
+    """Create Chrome WebDriver with Railway/Docker compatibility"""
+    chrome_opts = Options()
+    
+    # Find Chrome executable
+    chrome_binary = _find_chrome_executable()
+    if chrome_binary:
+        chrome_opts.binary_location = chrome_binary
+    
+    # Essential options for containerized environments
+    chrome_opts.add_argument("--no-sandbox")
+    chrome_opts.add_argument("--disable-dev-shm-usage")
+    chrome_opts.add_argument("--disable-gpu")
+    chrome_opts.add_argument("--disable-extensions")
+    chrome_opts.add_argument("--disable-setuid-sandbox")
+    chrome_opts.add_argument("--disable-web-security")
+    chrome_opts.add_argument("--disable-features=VizDisplayCompositor")
+    chrome_opts.add_argument("--window-size=1920,1080")
+    chrome_opts.add_argument("--remote-debugging-port=9222")
+    chrome_opts.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+    
+    if headless:
+        chrome_opts.add_argument("--headless")
+    
+    # Try to find chromedriver
+    driver_path = _find_chromedriver()
+    
+    try:
+        if driver_path:
+            # Use found chromedriver
+            service = Service(driver_path)
+            return webdriver.Chrome(service=service, options=chrome_opts)
+        else:
+            # Try to use webdriver-manager as fallback
+            try:
+                from webdriver_manager.chrome import ChromeDriverManager
+                service = Service(ChromeDriverManager().install())
+                return webdriver.Chrome(service=service, options=chrome_opts)
+            except Exception as e:
+                print(f"ChromeDriverManager failed: {e}")
+                # Try without service (let selenium find chromedriver)
+                return webdriver.Chrome(options=chrome_opts)
+                
+    except WebDriverException as e:
+        print(f"Failed to create Chrome driver: {e}")
+        return None
+    except Exception as e:
+        print(f"Unexpected error creating driver: {e}")
+        return None
 
 def _find_first(driver, xpaths: List[str]) -> Optional[object]:
     """Find first element matching any of the provided XPaths"""
@@ -110,33 +215,20 @@ def _wait_for_content_growth(driver, wait: WebDriverWait, min_growth: int = 80) 
     except TimeoutException:
         pass
 
-def _make_driver(headless: bool = True) -> webdriver.Chrome:
-    """Create Chrome WebDriver with appropriate options"""
-    chrome_opts = Options()
-    if headless:
-        chrome_opts.add_argument("--headless=new")
-        chrome_opts.add_argument("--disable-gpu")
-    
-    # Railway/production optimizations
-    chrome_opts.add_argument("--no-sandbox")
-    chrome_opts.add_argument("--disable-dev-shm-usage")
-    chrome_opts.add_argument("--disable-setuid-sandbox")
-    chrome_opts.add_argument("--disable-web-security")
-    chrome_opts.add_argument("--disable-features=VizDisplayCompositor")
-    chrome_opts.add_argument("--window-size=1920,1080")
-    chrome_opts.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-    
-    service = Service(ChromeDriverManager().install())
-    return webdriver.Chrome(service=service, options=chrome_opts)
-
 def _analyze_one_with_debugging(target_url: str, timeout: int = DEFAULT_TIMEOUT) -> tuple[str, List[str]]:
     """Analyze a single URL with detailed debugging"""
     debug_log = []
-    driver = _make_driver(headless=True)
-    wait = WebDriverWait(driver, timeout)
     
     try:
-        debug_log.append("Creating fresh Chrome driver...")
+        debug_log.append("Creating Chrome driver...")
+        driver = _make_driver(headless=True)
+        
+        if not driver:
+            debug_log.append("ERROR: Failed to create Chrome driver - Chrome may not be installed")
+            return "", debug_log
+            
+        wait = WebDriverWait(driver, timeout)
+        
         debug_log.append(f"Navigating to {RATEMYSITE_URL}")
         driver.get(RATEMYSITE_URL)
         
@@ -225,8 +317,12 @@ def _analyze_one_with_debugging(target_url: str, timeout: int = DEFAULT_TIMEOUT)
         debug_log.append(f"Traceback: {traceback.format_exc()}")
         return "", debug_log
     finally:
-        debug_log.append("Closing driver...")
-        driver.quit()
+        try:
+            if 'driver' in locals() and driver:
+                debug_log.append("Closing driver...")
+                driver.quit()
+        except Exception as e:
+            debug_log.append(f"Error closing driver: {e}")
 
 def _grab_block(text: str, labels: List[str], multiline=True) -> str:
     """Extract a block of text based on labels"""
